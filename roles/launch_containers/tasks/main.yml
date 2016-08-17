@@ -1,0 +1,5 @@
+---
+- include: launch_container.yml
+  with_items: "{{ containers }}"
+  tags:
+    - launch_containers

@@ -1,0 +1,8 @@
+---
+containers:
+  - name: node1
+    addr_cidr: 10.155.92.21/24
+  - name: node2
+    addr_cidr: 10.155.92.22/24
+container_gateway: 10.155.92.1
+container_dns: 10.155.92.1

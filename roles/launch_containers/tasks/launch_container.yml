@@ -1,0 +1,53 @@
+---
+- name: Check the container exists
+  command: lxc info {{ item.name }}
+  register: launch_containers_container_exists
+  changed_when: no
+  failed_when: launch_containers_container_exists.rc not in [0, 1]
+  check_mode: no
+
+- block:
+    - name: Create a stopped container
+      lxd_container:
+        name: "{{ item.name }}"
+        state: stopped
+        source:
+          type: image
+          mode: pull
+          server: https://images.linuxcontainers.org
+          protocol: lxd
+          alias: centos/7/amd64
+        profiles: ["default"]
+        wait_for_ipv4_addresses: false
+        timeout: 600
+
+    - name: Write container network-scripts to a temporary file
+      template: src=ifcfg-eth0.j2 dest=/tmp/launch_containers_ifcfg_eth0
+
+    - name: Write container network-scripts to a temporary file
+      command: lxc file push /tmp/launch_containers_ifcfg_eth0 {{ item.name }}/etc/sysconfig/network-scripts/ifcfg-eth0
+
+    - name: Delete the temporary network-scripts file
+      file: path=/tmp/launch_containers_ifcfg_eth0 state=absent
+  when: launch_containers_container_exists.rc != 0 and not ansible_check_mode
+
+- name: Start a container
+  lxd_container:
+    name: "{{ item.name }}"
+    state: started
+  when: not ansible_check_mode
+
+- block:
+    - name: Check if we need to install python
+      delegate_to: "{{ item.name }}"
+      raw: "if [ -f /usr/bin/dpkg ]; then dpkg -s python; else :; fi"
+      register: python_install_check
+      failed_when: python_install_check.rc not in [0, 1]
+      changed_when: no
+      check_mode: no
+
+    - name: Install python
+      delegate_to: "{{ item.name }}"
+      raw: apt-get install -y python
+      when: "{{ python_install_check.rc }} != 0"
+  when: launch_containers_container_exists.rc != 0 and not ansible_check_mode

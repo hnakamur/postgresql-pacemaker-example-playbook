@@ -1,0 +1,12 @@
+DEVICE=eth0
+BOOTPROTO=static
+ONBOOT=yes
+HOSTNAME=LXC_NAME
+NM_CONTROLLED=no
+TYPE=Ethernet
+MTU=
+DNS1="{{ container_dns }}"
+DOMAIN=lxd
+IPADDR={{ item.addr_cidr | ipaddr('address') }}
+NETMASK={{ item.addr_cidr | ipaddr('netmask') }}
+GATEWAY={{ container_gateway }}

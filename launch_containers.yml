@@ -1,0 +1,7 @@
+---
+- hosts: localhost
+  connection: local
+  vars_files:
+    - group_vars/development/vars.yml
+  roles:
+    - launch_containers

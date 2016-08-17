@@ -1,0 +1,6 @@
+[development]
+node1
+node2
+
+[development:vars]
+ansible_connection = lxd
