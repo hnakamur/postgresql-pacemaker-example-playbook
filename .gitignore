@@ -1,2 +1,3 @@
 *.retry
+roles/postgresql/files/ssh_host_ed25519_key-*.pub
 /venv2/

@@ -2,7 +2,37 @@
 containers:
   - name: node1
     addr_cidr: 10.155.92.21/24
+    pcs_constraint_prefer: 0
   - name: node2
     addr_cidr: 10.155.92.22/24
+    pcs_constraint_prefer: 0
 container_gateway: 10.155.92.1
 container_dns: 10.155.92.1
+container_names: "{{ containers | map(attribute='name') | list }}"
+
+# NOTE: postgresql_master_nodename must be the same as name of one of containers
+postgresql_master_nodename: node1
+postgresql_master_vip: 10.155.92.20
+postgresql_replication_allow_cidr: 10.155.92.0/24
+postgresql_major_dot_minor_version: "9.5"
+postgresql_major_minor_version: "{{ postgresql_major_dot_minor_version | replace('.', '') }}"
+postgresql_download_dir: /usr/local/downloads
+postgresql_repo_rpm_url: http://yum.postgresql.org/{{ postgresql_major_dot_minor_version }}/redhat/rhel-7-x86_64/pgdg-centos95-{{ postgresql_major_dot_minor_version }}-2.noarch.rpm
+postgresql_repo_rpm_path: "{{ postgresql_download_dir }}/{{ postgresql_repo_rpm_url | basename }}"
+postgresql_prefix_dir: /usr/pgsql-{{ postgresql_major_dot_minor_version }}
+postgresql_bin_dir: "{{ postgresql_prefix_dir }}/bin"
+postgresql_pid_dir: /var/run/postgresql
+postgresql_port: 5432
+postgresql_replication_user: repl_user
+postgresql_replication_password: "{{ development.secrets.postgresql_replication_password }}"
+postgresql_postgres_ssh_private_key: "{{ development.secrets.postgresql_postgres_ssh_private_key }}"
+postgresql_postgres_ssh_public_key: "{{ development.secrets.postgresql_postgres_ssh_public_key }}"
+
+# If you need to set up pcs cluster again, please run these commands at
+# pacemaker_pcs_controller_nodename then run Ansible again.
+# pcs cluster stop --all
+# pcs cluster destroy --all
+pacemaker_pcs_controller_nodename: "{{ postgresql_master_nodename }}"
+pacemaker_pcs_pgsql_config_file_path: /var/lib/pacemaker/cib/cib-pgsql.xml
+pacemaker_cluster_name: pgsqlcluster
+pacemaker_hacluster_password: "{{ development.secrets.pacemaker_hacluster_password }}"

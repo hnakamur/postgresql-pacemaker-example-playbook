@@ -1,0 +1,45 @@
+---
+- name: Install OpenSSH sever
+  yum: name=openssh-server state=present
+
+- name: Start and enable sshd service
+  service: name=sshd state=started enabled=true
+
+- name: Set postgres paths as facts
+  set_fact:
+    postgresql_postgres_ssh_private_key_path: "{{ postgresql_postgres_home_dir }}/.ssh/id_ed25519"
+    postgresql_postgres_ssh_known_hosts_path: "{{ postgresql_postgres_home_dir }}/.ssh/known_hosts"
+
+- name: Set up postgres authorized_keys
+  authorized_key:
+    user: postgres
+    key: "{{ postgresql_postgres_ssh_public_key }}"
+    manage_dir: yes
+
+- name: Copy postgres user .ssh private key
+  template: src=id_ed25519.j2 dest={{ postgresql_postgres_ssh_private_key_path }} owner=postgres group=postgres mode=0400
+
+- name: Fetch ssh public key
+  fetch: src=/etc/ssh/ssh_host_ed25519_key.pub dest=roles/postgresql/files/ssh_host_ed25519_key-{{ inventory_hostname_short }}.pub flat=yes
+
+- name: Set peer node name
+  set_fact:
+    postgresql_peer_nodename: "{{ (container_names | reject('equalto', inventory_hostname_short) | list)[0] }}"
+    postgresql_peer_ipaddr: "{{ (containers | rejectattr('name', 'equalto', inventory_hostname_short) | list)[0].addr_cidr | ipaddr('address') }}"
+
+- name: Set peer node ssh public key content
+  set_fact:
+    postgresql_peer_ssh_pub_key: "{{ lookup('file', 'roles/postgresql/files/ssh_host_ed25519_key-' + postgresql_peer_nodename + '.pub') }}"
+
+- name: Create postgres known_hosts
+  blockinfile:
+    dest: "{{ postgresql_postgres_ssh_known_hosts_path }}"
+    create: true
+    backup: true
+    owner: postgres
+    group: postgres
+    mode: 0600
+    state: present
+    block: |
+      {{ postgresql_master_vip }} {{ postgresql_peer_ssh_pub_key }}
+      {{ postgresql_peer_ipaddr }} {{ postgresql_peer_ssh_pub_key }}

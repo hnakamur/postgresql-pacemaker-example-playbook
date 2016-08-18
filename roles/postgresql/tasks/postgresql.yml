@@ -1,0 +1,140 @@
+---
+- name: Install basic packages
+  yum: name={{ item }} state=present
+  with_items:
+    - sudo
+    - python-psycopg2
+
+- name: Do not require tty for root user
+  copy: src=sudoers_root dest=/etc/sudoers.d/00_root owner=root group=root mode=0440
+
+- name: Create directory for download
+  file: path={{ postgresql_download_dir }} state=directory
+
+- name: Download PostgreSQL yum repository rpm
+  get_url: url={{ postgresql_repo_rpm_url }} dest={{ postgresql_repo_rpm_path }}
+
+- name: Install PostgreSQL yum repository rpm
+  yum: name={{ postgresql_repo_rpm_path }} state=present
+
+- name: Install PostgreSQL rpm
+  yum: name={{ item }} state=present
+  with_items:
+    - postgresql{{ postgresql_major_minor_version }}-server
+    - postgresql{{ postgresql_major_minor_version }}-contrib
+
+- name: Get postgres home directory
+  shell: "getent passwd postgres | awk -F : '{print $6}'"
+  register: postgresql_postgres_home_dir_result
+  changed_when: false
+  check_mode: no
+
+- name: Set postgres home directory as fact
+  set_fact:
+    postgresql_postgres_home_dir: "{{ postgresql_postgres_home_dir_result.stdout }}"
+
+- name: Set postgres directories as facts
+  set_fact:
+    postgresql_data_dir: "{{ postgresql_postgres_home_dir }}/{{ postgresql_major_dot_minor_version }}/data"
+    postgresql_archive_dir: "{{ postgresql_postgres_home_dir }}/{{ postgresql_major_dot_minor_version }}/archive"
+    postgresql_backup_dir: "{{ postgresql_postgres_home_dir }}/{{ postgresql_major_dot_minor_version }}/backups"
+
+- name: Create PostgreSQL database directories
+  file: path={{ item }} state=directory owner=postgres group=postgres mode=0700
+  with_items:
+    - "{{ postgresql_data_dir }}"
+    - "{{ postgresql_archive_dir }}"
+    - "{{ postgresql_backup_dir }}"
+
+- include: ssh_to_peer.yml
+
+- name: Create .pgpass file to be used for pg_basebackup non-interactivelly
+  blockinfile:
+    dest: "{{ postgresql_postgres_home_dir }}/.pgpass"
+    create: true
+    backup: true
+    mode: 0600
+    state: present
+    block: |
+      {{ postgresql_master_vip }}:{{ postgresql_port }}:*:{{ postgresql_replication_user }}:{{ postgresql_replication_password | regex_replace('([:\\\\])', '\\\\\\1') }}
+      {{ postgresql_peer_ipaddr }}:{{ postgresql_port }}:*:{{ postgresql_replication_user }}:{{ postgresql_replication_password | regex_replace('([:\\\\])', '\\\\\\1') }}
+  # NOTE: Use become_user here so that backup file is created with that user
+  become: true
+  become_user: postgres
+
+- block:
+    - name: Check PostgreSQL master database exists
+      stat: path={{ postgresql_data_dir }}/PG_VERSION
+      register: postgresql_master_db_st
+
+    - name: Initialize PostgreSQL master database
+      command: "{{ postgresql_bin_dir }}/postgresql{{ postgresql_major_minor_version }}-setup initdb"
+      environment:
+        PGSETUP_INITDB_OPTIONS: '-E utf8 --no-locale'
+      when: not postgresql_master_db_st.stat.exists
+
+    - name: Update postgresql pg_hba.conf at master
+      template: src=pg_hba.conf.j2 dest={{ postgresql_data_dir }}/pg_hba.conf owner=postgres group=postgres mode=0644
+
+    - name: Update postgresql.conf master
+      blockinfile:
+        dest: "{{ postgresql_data_dir }}/postgresql.conf"
+        backup: true
+        mode: 0600
+        state: present
+        block: |
+          # my customized options
+          listen_addresses = '*'
+          port = {{ postgresql_port }}
+          logging_collector = on
+          archive_mode = on
+          archive_command = 'cp %p {{ postgresql_archive_dir }}/%f'
+          hot_standby = on
+          hot_standby_feedback = on
+          max_replication_slots = 8
+          max_standby_streaming_delay = -1
+          max_standby_archive_delay = -1
+          max_wal_senders = 8
+          restart_after_crash = off
+          synchronous_commit = on
+          wal_keep_segments = 1000
+          wal_level = hot_standby
+          wal_receiver_status_interval = 2
+      # NOTE: Use become_user here so that backup file is created with that user
+      become: true
+      become_user: postgres
+
+    # NOTE: Do not enable postgresql service since they are started by pacemaker
+    - name: Start master PostgreSQL just to create {{ postgresql_replication_user }} user
+      service: name=postgresql-{{ postgresql_major_dot_minor_version }} state=started enabled=false
+      when: not postgresql_master_db_st.stat.exists
+
+    - name: Create PostgreSQL user for replication
+      postgresql_user: name={{ postgresql_replication_user }} password={{ postgresql_replication_password }} role_attr_flags=LOGIN,REPLICATION state=present
+      become: true
+      become_user: postgres
+      when: not postgresql_master_db_st.stat.exists
+  run_once: true
+  delegate_to: "{{ postgresql_master_nodename }}"
+
+- name: Check if node is PostgreSQL standby
+  set_fact:
+    postgresql_is_standby_node: "{{ inventory_hostname_short != postgresql_master_nodename }}"
+
+- block:
+    - name: Check PostgreSQL standby database exists
+      stat: path={{ postgresql_data_dir }}/PG_VERSION
+      register: postgresql_standby_db_st
+
+    - name: Create PostgreSQL standby database
+      command: "{{ postgresql_bin_dir }}/pg_basebackup -h {{ postgresql_peer_ipaddr }} -p {{ postgresql_port }} -U {{ postgresql_replication_user }} -D {{ postgresql_data_dir }} --xlog --checkpoint=fast"
+      become: true
+      become_user: postgres
+      when: not postgresql_standby_db_st.stat.exists
+  when: "{{ postgresql_is_standby_node }}"
+
+- name: Stop master PostgreSQL now and let pacemaker to control PostgreSQL service
+  service: name=postgresql-{{ postgresql_major_dot_minor_version }} state=stopped enabled=false
+  when: not postgresql_master_db_st.stat.exists
+  run_once: true
+  delegate_to: "{{ postgresql_master_nodename }}"

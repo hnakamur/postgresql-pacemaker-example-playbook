@@ -1,0 +1,93 @@
+---
+- name: Write /etc/hosts
+  template: src=hosts.j2 dest=/etc/hosts
+
+- name: Install pacemaker
+  yum: name={{ item }} state=present
+  with_items:
+    - pacemaker
+    - pacemaker-remote
+    - corosync
+    - pcs
+    - resource-agents
+    # NOTE: the which command is needed by Pacemaker IPaddr2 resource agent script
+    - which
+
+- name: Start and enable pcsd
+  service: name=pcsd state=started enabled=yes
+
+# NOTE: Do not start and enable corosync and pacemaker services
+#       since they are started by pcsd.
+
+- name: Set password of hacluster user
+  user: name=hacluster password={{ pacemaker_hacluster_password | password_hash('sha512') }} state=present
+
+- block:
+  - name: Check /etc/corosync/corosync.conf exists
+    stat: path=/etc/corosync/corosync.conf
+    register: pacemaker_corosync_conf_st
+
+  - name: Set up pcs cluster authentication
+    command: "pcs cluster auth -u hacluster -p {{ pacemaker_hacluster_password }} {{ container_names | join(' ') }}"
+    when: not pacemaker_corosync_conf_st.stat.exists
+
+  - name: Set up pcs cluster
+    command: "pcs cluster setup --name {{ pacemaker_cluster_name }} {{ container_names | join(' ') }}"
+    args:
+      creates: /etc/corosync/corosync.conf
+
+  - name: Check pcs cluster status
+    command: pcs status
+    register: pacemaker_pcs_status
+    failed_when: pacemaker_pcs_status.rc not in [0, 1]
+    changed_when: no
+    check_mode: no
+
+  - name: Start pcs cluster
+    command: pcs cluster start --all
+    when: pacemaker_pcs_status.rc != 0
+
+  - name: Create cib xml for managing PostgreSQL with PaceMaker
+    shell: |
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} property set no-quorum-policy="ignore" && \
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} property set stonith-enabled="false" && \
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} resource create pgsql ocf:heartbeat:pgsql \
+         pgctl="{{ postgresql_bin_dir }}/pg_ctl" \
+         psql="{{ postgresql_bin_dir }}/psql" \
+         "pgdata={{ postgresql_data_dir }}" \
+         "logfile={{ postgresql_data_dir }}/startup.log" \
+         config="{{ postgresql_data_dir }}/postgresql.conf" \
+         tmpdir="/var/run/postgresql" \
+         rep_mode="sync" \
+         "node_list={{ container_names | join(' ') }}" \
+         master_ip="{{ postgresql_master_vip }}" \
+         repuser="repl_user" \
+         primary_conninfo_opt="keepalives_idle=60 keepalives_interval=5 keepalives_count=5" \
+         restore_command="scp {{ postgresql_master_vip }}:{{ postgresql_archive_dir }}/%f %p" \
+         stop_escalate="110" \
+         \
+         op start timeout=120s on-fail=restart \
+         op stop timeout=120s on-fail=restart \
+         op monitor interval=3s timeout=10s on-fail=restart \
+         op monitor interval=2s role=Master timeout=10s on-fail=restart \
+         op promote timeout=120s on-fail=block \
+         op demote timeout=120s on-fail=restart \
+         meta migration-threshold=2 \
+         --master clone-max=2 clone-node-max=1 && \
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} resource create master-ip ocf:heartbeat:IPaddr2 \
+         ip="{{ postgresql_master_vip }}" iflabel="master" \
+         op monitor interval=5s && \
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} constraint colocation add master-ip \
+         with master pgsql-master && \
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} constraint order start master-ip \
+         then promote pgsql-master && \
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} constraint location pgsql-master prefers \
+         {% for c in containers %} {{ c.name }}={{ c.pcs_constraint_prefer }}{% endfor %} && \
+      pcs -f {{ pacemaker_pcs_pgsql_config_file_path }} constraint location master-ip prefers \
+         {% for c in containers %} {{ c.name }}={{ c.pcs_constraint_prefer }}{% endfor %} && \
+      pcs cluster cib-push {{ pacemaker_pcs_pgsql_config_file_path }} && \
+      pcs cluster cib {{ pacemaker_pcs_pgsql_config_file_path }}
+    args:
+      creates: "{{ pacemaker_pcs_pgsql_config_file_path }}"
+  run_once: true
+  delegate_to: "{{ pacemaker_pcs_controller_nodename }}"
